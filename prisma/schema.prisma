@@ -1,0 +1,304 @@
+// Influence Graph Platform - Prisma Schema
+// Models dynamic influence relationships inside organizations
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== ORGANIZATION & TENANCY ====================
+
+model Organization {
+  id          String       @id @default(cuid())
+  name        String
+  slug        String       @unique
+  description String?
+  logoUrl     String?
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  // Relations
+  departments  Department[]
+  users        User[]
+  projects     Project[]
+  proposals    Proposal[]
+  invitations  Invitation[]
+
+  @@index([slug])
+}
+
+model Invitation {
+  id           String       @id @default(cuid())
+  email        String
+  token        String       @unique
+  role         Role         @default(MEMBER)
+  departmentId String?
+  organizationId String
+  invitedBy    String
+  expiresAt    DateTime
+  acceptedAt   DateTime?
+  createdAt    DateTime     @default(now())
+
+  // Relations
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  department   Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  @@index([token])
+  @@index([email])
+}
+
+// ==================== DEPARTMENT STRUCTURE ====================
+
+model Department {
+  id               String       @id @default(cuid())
+  name             String
+  code             String
+  description      String?
+  organizationId   String
+  parentDeptId     String?
+  managerId        String?
+  budget           Float?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  // Relations
+  organization    Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  parentDept      Department?   @relation("DepartmentHierarchy", fields: [parentDeptId], references: [id], onDelete: SetNull)
+  subDepartments  Department[]  @relation("DepartmentHierarchy")
+  users           User[]
+  invitations     Invitation[]
+  projects        Project[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+}
+
+// ==================== USER & ACCESS CONTROL ====================
+
+enum Role {
+  ADMIN       // Full system access
+  ORG_ADMIN   // Organization admin
+  DEPT_HEAD   // Department head
+  MANAGER     // Team manager
+  MEMBER      // Regular member
+  VIEWER      // Read-only access
+}
+
+model User {
+  id             String       @id @default(cuid())
+  email          String       @unique
+  name           String
+  avatarUrl      String?
+  hashedPassword String?
+  role           Role         @default(MEMBER)
+  organizationId String
+  departmentId   String?
+  jobTitle       String?
+  isActive       Boolean      @default(true)
+  lastLoginAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  // Relations
+  organization       Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  department         Department?           @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  // Influence Relations
+  outgoingInfluence  InfluenceEdge[]       @relation("OutgoingInfluence", fields: [], references: [])
+  incomingInfluence  InfluenceEdge[]       @relation("IncomingInfluence", fields: [], references: [])
+
+  // Activity Relations
+  authoredProjects   Project[]             @relation("ProjectAuthor")
+  authoredProposals  Proposal[]            @relation("ProposalAuthor")
+  influenceEvents    InfluenceEvent[]      @relation("InfluenceEventSubject")
+  influenceScores    InfluenceScore[]
+
+  @@index([email])
+  @@index([organizationId])
+  @@index([departmentId])
+}
+
+// ==================== INFLUENCE GRAPH ====================
+
+model InfluenceEdge {
+  id              String       @id @default(cuid())
+  sourceUserId    String
+  targetUserId    String
+  organizationId  String
+  weight          Float        // 0.0 - 100.0 (influence strength)
+  context         String?      // Context of influence (project, proposal, etc.)
+  contextType     String?      // Type: PROJECT, PROPOSAL, MENTORSHIP, etc.
+  confidence      Float        @default(1.0) // Confidence level of this edge
+  isActive        Boolean      @default(true)
+  verifiedAt      DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  // Relations
+  sourceUser      User         @relation("OutgoingInfluence", fields: [sourceUserId], references: [id], onDelete: Cascade)
+  targetUser      User         @relation("IncomingInfluence", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceUserId, targetUserId, context])
+  @@index([sourceUserId])
+  @@index([targetUserId])
+  @@index([organizationId])
+}
+
+// ==================== INFLUENCE DYNAMICS ====================
+
+model InfluenceScore {
+  id              String       @id @default(cuid())
+  userId          String
+  organizationId  String
+  score           Float        @default(0.0) // Aggregated influence score
+  rawScore        Float        @default(0.0) // Score before decay
+  volatility      Float        @default(0.0) // Score volatility metric
+  rank            Int?
+  departmentRank  Int?
+  scoreType       String       @default("TOTAL") // TOTAL, PROJECT, PROPOSAL, etc.
+  calculatedAt    DateTime     @default(now())
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  // Relations
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scoreType])
+  @@index([userId])
+  @@index([organizationId])
+  @@index([score])
+}
+
+model InfluenceEvent {
+  id              String       @id @default(cuid())
+  organizationId  String
+  subjectUserId   String       // User whose influence is affected
+  eventType       String       // PROJECT_SUCCESS, PROPOSAL_ADOPTED, MENTORSHIP, etc.
+  weightDelta     Float        // Change in influence weight
+  context         String?      // JSON context data
+  processedAt     DateTime?
+  createdAt       DateTime     @default(now())
+
+  // Relations
+  subjectUser     User         @relation("InfluenceEventSubject", fields: [subjectUserId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([subjectUserId])
+  @@index([createdAt])
+}
+
+// ==================== PROJECTS & PROPOSALS ====================
+
+model Project {
+  id              String       @id @default(cuid())
+  name            String
+  description     String?
+  organizationId  String
+  departmentId    String?
+  authorId        String
+  status          String       @default("PLANNED") // PLANNED, ACTIVE, COMPLETED, CANCELLED
+  startDate       DateTime?
+  endDate         DateTime?
+  budget          Float?
+  successScore    Float?       // 0.0 - 1.0, affects influence
+  completedAt     DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  // Relations
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  department      Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  author          User         @relation("ProjectAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  members         ProjectMember[]
+  proposals       Proposal[]
+
+  @@index([organizationId])
+  @@index([authorId])
+}
+
+model ProjectMember {
+  id          String       @id @default(cuid())
+  projectId   String
+  userId      String
+  role        String       @default("MEMBER") // LEAD, MEMBER, CONTRIBUTOR
+  contributionScore Float  @default(0.0)
+  joinedAt    DateTime     @default(now())
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+}
+
+model Proposal {
+  id              String       @id @default(cuid())
+  title           String
+  description     String?
+  organizationId  String
+  projectId       String?
+  authorId        String
+  status          String       @default("DRAFT") // DRAFT, SUBMITTED, UNDER_REVIEW, ADOPTED, REJECTED
+  impact          Float?       // Estimated organizational impact
+  adoptedAt       DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  // Relations
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project         Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  author          User         @relation("ProposalAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  votes           ProposalVote[]
+
+  @@index([organizationId])
+  @@index([authorId])
+}
+
+model ProposalVote {
+  id          String       @id @default(cuid())
+  proposalId  String
+  userId      String
+  vote        Boolean      // true = for, false = against
+  weight      Float        @default(1.0) // Vote weight based on influence
+  comment     String?
+  createdAt   DateTime     @default(now())
+
+  proposal    Proposal     @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+
+  @@unique([proposalId, userId])
+}
+
+// ==================== CACHE & AUDIT ====================
+
+model CacheEntry {
+  id          String       @id @default(cuid())
+  key         String       @unique
+  value       String       // JSON stringified value
+  ttl         Int          // Time to live in seconds
+  createdAt   DateTime     @default(now())
+  expiresAt   DateTime
+
+  @@index([key])
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id              String       @id @default(cuid())
+  organizationId  String?
+  userId          String?
+  action          String
+  entityType      String
+  entityId        String?
+  oldValue        String?      // JSON
+  newValue        String?      // JSON
+  ipAddress       String?
+  userAgent       String?
+  createdAt       DateTime     @default(now())
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([entityType, entityId])
+}
